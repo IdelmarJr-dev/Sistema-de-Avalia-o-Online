@@ -46,9 +46,3 @@ Este projeto cumpre os requisitos da disciplina:
 7. Mostrar Debug (no backend):
    - GET /debug/logs
    - GET /debug/notas
-
-## Observação importante sobre trigger e UPDATE
-O trigger atual do seu banco está em `AFTER INSERT ON respostas`.  
-No endpoint /responder, usamos `ON CONFLICT DO UPDATE`. Se já existia resposta, vira UPDATE e o trigger não dispara.
-Para a apresentação, o mais simples é: **responder uma prova pela 1ª vez**.
-Se quiser recalcular em UPDATE, crie um segundo trigger `AFTER UPDATE ON respostas` chamando a mesma function.
