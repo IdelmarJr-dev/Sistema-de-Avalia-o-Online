@@ -29,20 +29,3 @@ Este projeto cumpre os requisitos da disciplina:
 2. `npm i`
 3. `npm run dev`
 4. Abra: http://localhost:5173
-
-## 4) Fluxo de Demonstração (seminário)
-1. Login como professor (pode criar via botão “Criar usuários demo”):
-   - prof@demo.com / 123456
-2. Criar prova (Trigger trg_log_prova grava em logs)
-3. (Opcional) Cadastrar questões via API:
-   - POST /provas/:id/questoes
-4. Login como aluno:
-   - aluno@demo.com / 123456
-5. Fazer prova e enviar respostas:
-   - inserts em respostas disparam trg_calcular_nota
-   - trigger chama calcular_nota -> grava/atualiza notas
-6. Abrir Relatórios:
-   - chama functions relatorio_aprovados_reprovados, relatorio_desempenho_provas, relatorio_media_alunos
-7. Mostrar Debug (no backend):
-   - GET /debug/logs
-   - GET /debug/notas
