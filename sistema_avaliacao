@@ -1,0 +1,1612 @@
+--
+-- PostgreSQL database dump
+--
+
+\restrict D6IitSkkZStMB786O5vrO3BfcPWvFdntOPYSHoziPFbBAcYiRXfpZcnSgt52DDf
+
+-- Dumped from database version 16.11 (Ubuntu 16.11-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 17.6 (Ubuntu 17.6-1.pgdg24.04+1)
+
+-- Started on 2026-01-29 19:19:50 -03
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- TOC entry 251 (class 1255 OID 25017)
+-- Name: calcular_nota(integer, integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.calcular_nota(id_aluno_c integer, id_prova_c integer) RETURNS numeric
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    total_questoes INT;
+    acertos INT;
+    nota NUMERIC(5,2);
+BEGIN
+    SELECT COUNT(*) INTO total_questoes
+    FROM public.questoes
+    WHERE id_prova = id_prova_c;
+
+    IF total_questoes = 0 THEN
+        RETURN 0;
+    END IF;
+
+    SELECT COUNT(*) INTO acertos
+    FROM public.respostas r
+    JOIN public.questoes q ON r.id_questao = q.id_questao
+    WHERE r.id_usuario = id_aluno_c
+      AND q.id_prova = id_prova_c
+      AND COALESCE(r.resposta_dada,'') = COALESCE(q.resposta_correta,'');
+
+    nota := (acertos::NUMERIC / total_questoes::NUMERIC) * 10;
+
+    INSERT INTO public.notas (id_usuario, id_prova, pontuacao)
+    VALUES (id_aluno_c, id_prova_c, nota)
+    ON CONFLICT (id_usuario, id_prova) DO UPDATE
+    SET pontuacao = EXCLUDED.pontuacao,
+        data_avaliacao = CURRENT_TIMESTAMP;
+
+    RETURN nota;
+END;
+$$;
+
+
+ALTER FUNCTION public.calcular_nota(id_aluno_c integer, id_prova_c integer) OWNER TO postgres;
+
+--
+-- TOC entry 253 (class 1255 OID 25083)
+-- Name: consultar_provas_user(integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.consultar_provas_user(id_professor_c integer) RETURNS TABLE(id_prova integer, titulo character varying, disciplina character varying, data_criacao date, professor character varying)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    existe INT;
+BEGIN
+    -- Verifica se o professor existe
+    SELECT COUNT(*) INTO existe
+    FROM usuarios
+    WHERE id_usuario = id_professor_c
+      AND tipo = 'professor';
+
+    IF existe = 0 THEN
+        RAISE EXCEPTION 'Professor com ID % não existe!', id_professor_c;
+    END IF;
+
+    -- Se existe, retorna as provas criadas por ele
+    RETURN QUERY
+    SELECT p.id_prova, p.titulo, p.disciplina, p.data_criacao, u.nome
+    FROM provas p
+    JOIN usuarios u ON p.id_professor = u.id_usuario
+    WHERE p.id_professor = id_professor_c
+    ORDER BY p.data_criacao DESC;
+END;
+$$;
+
+
+ALTER FUNCTION public.consultar_provas_user(id_professor_c integer) OWNER TO postgres;
+
+--
+-- TOC entry 250 (class 1255 OID 25059)
+-- Name: log_alteracao_nota(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.log_alteracao_nota() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.pontuacao IS DISTINCT FROM NEW.pontuacao THEN
+        INSERT INTO historico_notas (id_nota, nota_antiga, nota_nova, alterado_por)
+        VALUES (OLD.id_nota, OLD.pontuacao, NEW.pontuacao, NEW.id_usuario);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.log_alteracao_nota() OWNER TO postgres;
+
+--
+-- TOC entry 233 (class 1255 OID 25099)
+-- Name: log_criacao_prova(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.log_criacao_prova() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO logs (id_usuario, acao, descricao)
+    VALUES (NEW.id_professor, 'CRIAR_PROVA', 'Prova criada: ' || NEW.titulo);
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.log_criacao_prova() OWNER TO postgres;
+
+--
+-- TOC entry 252 (class 1255 OID 25116)
+-- Name: relatorio_aprovados_reprovados(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.relatorio_aprovados_reprovados() RETURNS TABLE(titulo text, aprovados integer, reprovados integer)
+    LANGUAGE sql
+    AS $$
+  SELECT
+    p.titulo,
+    COUNT(*) FILTER (WHERE n.pontuacao >= 7) ::int AS aprovados,
+    COUNT(*) FILTER (WHERE n.pontuacao <  7) ::int AS reprovados
+  FROM public.notas n
+  JOIN public.provas p ON n.id_prova = p.id_prova
+  GROUP BY p.titulo
+  ORDER BY p.titulo;
+$$;
+
+
+ALTER FUNCTION public.relatorio_aprovados_reprovados() OWNER TO postgres;
+
+--
+-- TOC entry 249 (class 1255 OID 25027)
+-- Name: relatorio_desempenho_provas(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.relatorio_desempenho_provas() RETURNS TABLE(prova character varying, media_turma numeric, melhor_nota numeric, pior_nota numeric)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.titulo,
+           CAST(AVG(n.pontuacao) AS NUMERIC(5,2)),
+           CAST(MAX(n.pontuacao) AS NUMERIC(5,2)),
+           CAST(MIN(n.pontuacao) AS NUMERIC(5,2))
+    FROM notas n
+    JOIN provas p ON n.id_prova = p.id_prova
+    GROUP BY p.titulo
+    ORDER BY AVG(n.pontuacao) DESC;
+END;
+$$;
+
+
+ALTER FUNCTION public.relatorio_desempenho_provas() OWNER TO postgres;
+
+--
+-- TOC entry 247 (class 1255 OID 25025)
+-- Name: relatorio_media_alunos(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.relatorio_media_alunos() RETURNS TABLE(aluno character varying, media numeric)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT u.nome, CAST(AVG(n.pontuacao) AS NUMERIC(5,2))
+    FROM notas n
+    JOIN usuarios u ON n.id_usuario = u.id_usuario
+    GROUP BY u.nome
+    ORDER BY AVG(n.pontuacao) DESC;
+END;
+$$;
+
+
+ALTER FUNCTION public.relatorio_media_alunos() OWNER TO postgres;
+
+--
+-- TOC entry 246 (class 1255 OID 25024)
+-- Name: relatorio_notas_aluno(integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.relatorio_notas_aluno(id_aluno integer) RETURNS TABLE(prova character varying, nota numeric)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT p.titulo, CAST(n.pontuacao AS NUMERIC(5,2))
+    FROM notas n
+    JOIN provas p ON n.id_prova = p.id_prova
+    WHERE n.id_usuario = id_aluno;
+END;
+$$;
+
+
+ALTER FUNCTION public.relatorio_notas_aluno(id_aluno integer) OWNER TO postgres;
+
+--
+-- TOC entry 245 (class 1255 OID 25023)
+-- Name: relatorio_notas_todos(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.relatorio_notas_todos() RETURNS TABLE(aluno character varying, prova character varying, nota numeric, data_avaliacao timestamp without time zone)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT u.nome, p.titulo, CAST(n.pontuacao AS NUMERIC(5,2)), n.data_avaliacao
+    FROM notas n
+    JOIN usuarios u ON n.id_usuario = u.id_usuario
+    JOIN provas p ON n.id_prova = p.id_prova
+    ORDER BY u.nome, p.titulo;
+END;
+$$;
+
+
+ALTER FUNCTION public.relatorio_notas_todos() OWNER TO postgres;
+
+--
+-- TOC entry 248 (class 1255 OID 25026)
+-- Name: relatorio_ranking_prova(integer); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.relatorio_ranking_prova(id_prova integer) RETURNS TABLE(aluno character varying, nota numeric)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT u.nome, CAST(n.pontuacao AS NUMERIC(5,2))
+    FROM notas n
+    JOIN usuarios u ON n.id_usuario = u.id_usuario
+    WHERE n.id_prova = id_prova
+    ORDER BY n.pontuacao DESC;
+END;
+$$;
+
+
+ALTER FUNCTION public.relatorio_ranking_prova(id_prova integer) OWNER TO postgres;
+
+--
+-- TOC entry 257 (class 1255 OID 25022)
+-- Name: resetar_prova(integer); Type: PROCEDURE; Schema: public; Owner: postgres
+--
+
+CREATE PROCEDURE public.resetar_prova(IN id_prova_r integer)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    DELETE FROM public.respostas
+    WHERE id_questao IN (
+        SELECT id_questao FROM public.questoes WHERE id_prova = id_prova_r
+    );
+
+    DELETE FROM public.notas
+    WHERE id_prova = id_prova_r;
+
+    RAISE NOTICE 'Prova % foi resetada com sucesso.', id_prova_r;
+END;
+$$;
+
+
+ALTER PROCEDURE public.resetar_prova(IN id_prova_r integer) OWNER TO postgres;
+
+--
+-- TOC entry 256 (class 1255 OID 25020)
+-- Name: trigger_calcular_nota(); Type: FUNCTION; Schema: public; Owner: postgres
+--
+
+CREATE FUNCTION public.trigger_calcular_nota() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    questoes_prova INT;
+    respostas_aluno INT;
+    prova_id INT;
+BEGIN
+    SELECT q.id_prova INTO prova_id
+    FROM public.questoes q
+    WHERE q.id_questao = NEW.id_questao;
+
+    SELECT COUNT(*) INTO questoes_prova
+    FROM public.questoes
+    WHERE id_prova = prova_id;
+
+    SELECT COUNT(*) INTO respostas_aluno
+    FROM public.respostas r
+    JOIN public.questoes q ON r.id_questao = q.id_questao
+    WHERE r.id_usuario = NEW.id_usuario
+      AND q.id_prova = prova_id;
+
+    -- Se o aluno respondeu todas as questões, calcula a nota
+    IF respostas_aluno >= questoes_prova THEN
+        PERFORM public.calcular_nota(NEW.id_usuario, prova_id);
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.trigger_calcular_nota() OWNER TO postgres;
+
+--
+-- TOC entry 255 (class 1255 OID 25101)
+-- Name: verificar_prova(integer); Type: PROCEDURE; Schema: public; Owner: postgres
+--
+
+CREATE PROCEDURE public.verificar_prova(IN id_prova_v integer)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    existe INT;
+    titulo_prova VARCHAR;
+    disciplina_prova VARCHAR;
+    professor_nome VARCHAR;
+BEGIN
+    -- Verifica se a prova existe
+    SELECT COUNT(*) INTO existe
+    FROM provas
+    WHERE id_prova = id_prova_v;
+
+    IF existe = 0 THEN
+        RAISE EXCEPTION 'Prova com ID % não existe!', id_prova_v;
+    ELSE
+        -- Busca os detalhes da prova
+        SELECT p.titulo, p.disciplina, u.nome
+        INTO titulo_prova, disciplina_prova, professor_nome
+        FROM provas p
+        JOIN usuarios u ON p.id_professor = u.id_usuario
+        WHERE p.id_prova = id_prova_v;
+
+        -- Exibe os detalhes como NOTICE
+        RAISE NOTICE 'Prova encontrada: ID=%, Título=%, Disciplina=%, Professor=%',
+                     id_prova_v, titulo_prova, disciplina_prova, professor_nome;
+    END IF;
+END;
+$$;
+
+
+ALTER PROCEDURE public.verificar_prova(IN id_prova_v integer) OWNER TO postgres;
+
+--
+-- TOC entry 254 (class 1255 OID 25081)
+-- Name: verificar_usuario(integer); Type: PROCEDURE; Schema: public; Owner: postgres
+--
+
+CREATE PROCEDURE public.verificar_usuario(IN id_usuario_v integer)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    existe INT;
+BEGIN
+    SELECT COUNT(*) INTO existe FROM usuarios WHERE id_usuario = id_usuario_v;
+    IF existe = 0 THEN
+        RAISE EXCEPTION 'Usuário com ID % não existe!', id_usuario_v;
+    ELSE
+        RAISE NOTICE 'Usuário com ID % encontrado.', id_usuario_v;
+    END IF;
+END;
+$$;
+
+
+ALTER PROCEDURE public.verificar_usuario(IN id_usuario_v integer) OWNER TO postgres;
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- TOC entry 226 (class 1259 OID 25030)
+-- Name: autenticacao; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.autenticacao (
+    id_sessao integer NOT NULL,
+    id_usuario integer NOT NULL,
+    token character varying(255) NOT NULL,
+    expiracao timestamp without time zone NOT NULL
+);
+
+
+ALTER TABLE public.autenticacao OWNER TO postgres;
+
+--
+-- TOC entry 225 (class 1259 OID 25029)
+-- Name: autenticacao_id_sessao_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.autenticacao_id_sessao_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.autenticacao_id_sessao_seq OWNER TO postgres;
+
+--
+-- TOC entry 3546 (class 0 OID 0)
+-- Dependencies: 225
+-- Name: autenticacao_id_sessao_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.autenticacao_id_sessao_seq OWNED BY public.autenticacao.id_sessao;
+
+
+--
+-- TOC entry 230 (class 1259 OID 25062)
+-- Name: feedback; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.feedback (
+    id_feedback integer NOT NULL,
+    id_usuario integer NOT NULL,
+    id_prova integer NOT NULL,
+    comentario text,
+    nota_avaliacao numeric(3,1),
+    data_envio timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.feedback OWNER TO postgres;
+
+--
+-- TOC entry 229 (class 1259 OID 25061)
+-- Name: feedback_id_feedback_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.feedback_id_feedback_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.feedback_id_feedback_seq OWNER TO postgres;
+
+--
+-- TOC entry 3549 (class 0 OID 0)
+-- Dependencies: 229
+-- Name: feedback_id_feedback_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.feedback_id_feedback_seq OWNED BY public.feedback.id_feedback;
+
+
+--
+-- TOC entry 228 (class 1259 OID 25042)
+-- Name: historico_notas; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.historico_notas (
+    id_historico integer NOT NULL,
+    id_nota integer NOT NULL,
+    nota_antiga numeric(5,2),
+    nota_nova numeric(5,2),
+    alterado_por integer NOT NULL,
+    data_alteracao timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.historico_notas OWNER TO postgres;
+
+--
+-- TOC entry 227 (class 1259 OID 25041)
+-- Name: historico_notas_id_historico_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.historico_notas_id_historico_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.historico_notas_id_historico_seq OWNER TO postgres;
+
+--
+-- TOC entry 3552 (class 0 OID 0)
+-- Dependencies: 227
+-- Name: historico_notas_id_historico_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.historico_notas_id_historico_seq OWNED BY public.historico_notas.id_historico;
+
+
+--
+-- TOC entry 232 (class 1259 OID 25085)
+-- Name: logs; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.logs (
+    id_log integer NOT NULL,
+    id_usuario integer,
+    acao character varying(100) NOT NULL,
+    descricao text,
+    data_evento timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.logs OWNER TO postgres;
+
+--
+-- TOC entry 231 (class 1259 OID 25084)
+-- Name: logs_id_log_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.logs_id_log_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.logs_id_log_seq OWNER TO postgres;
+
+--
+-- TOC entry 3555 (class 0 OID 0)
+-- Dependencies: 231
+-- Name: logs_id_log_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.logs_id_log_seq OWNED BY public.logs.id_log;
+
+
+--
+-- TOC entry 224 (class 1259 OID 24987)
+-- Name: notas; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.notas (
+    id_nota integer NOT NULL,
+    id_usuario integer NOT NULL,
+    id_prova integer NOT NULL,
+    pontuacao numeric(5,2),
+    data_avaliacao timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.notas OWNER TO postgres;
+
+--
+-- TOC entry 223 (class 1259 OID 24986)
+-- Name: notas_id_nota_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.notas_id_nota_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.notas_id_nota_seq OWNER TO postgres;
+
+--
+-- TOC entry 3558 (class 0 OID 0)
+-- Dependencies: 223
+-- Name: notas_id_nota_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.notas_id_nota_seq OWNED BY public.notas.id_nota;
+
+
+--
+-- TOC entry 218 (class 1259 OID 24939)
+-- Name: provas; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.provas (
+    id_prova integer NOT NULL,
+    titulo character varying(150) NOT NULL,
+    disciplina character varying(100) NOT NULL,
+    data_criacao date DEFAULT CURRENT_DATE NOT NULL,
+    id_professor integer NOT NULL
+);
+
+
+ALTER TABLE public.provas OWNER TO postgres;
+
+--
+-- TOC entry 217 (class 1259 OID 24938)
+-- Name: provas_id_prova_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.provas_id_prova_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.provas_id_prova_seq OWNER TO postgres;
+
+--
+-- TOC entry 3561 (class 0 OID 0)
+-- Dependencies: 217
+-- Name: provas_id_prova_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.provas_id_prova_seq OWNED BY public.provas.id_prova;
+
+
+--
+-- TOC entry 220 (class 1259 OID 24952)
+-- Name: questoes; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.questoes (
+    id_questao integer NOT NULL,
+    enunciado text NOT NULL,
+    tipo character varying(20) NOT NULL,
+    alternativas text,
+    resposta_correta character varying(255),
+    id_prova integer NOT NULL,
+    CONSTRAINT questoes_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['objetiva'::character varying, 'dissertativa'::character varying])::text[])))
+);
+
+
+ALTER TABLE public.questoes OWNER TO postgres;
+
+--
+-- TOC entry 219 (class 1259 OID 24951)
+-- Name: questoes_id_questao_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.questoes_id_questao_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.questoes_id_questao_seq OWNER TO postgres;
+
+--
+-- TOC entry 3564 (class 0 OID 0)
+-- Dependencies: 219
+-- Name: questoes_id_questao_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.questoes_id_questao_seq OWNED BY public.questoes.id_questao;
+
+
+--
+-- TOC entry 222 (class 1259 OID 24967)
+-- Name: respostas; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.respostas (
+    id_resposta integer NOT NULL,
+    id_usuario integer NOT NULL,
+    id_questao integer NOT NULL,
+    resposta_dada text,
+    data_envio timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.respostas OWNER TO postgres;
+
+--
+-- TOC entry 221 (class 1259 OID 24966)
+-- Name: respostas_id_resposta_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.respostas_id_resposta_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.respostas_id_resposta_seq OWNER TO postgres;
+
+--
+-- TOC entry 3567 (class 0 OID 0)
+-- Dependencies: 221
+-- Name: respostas_id_resposta_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.respostas_id_resposta_seq OWNED BY public.respostas.id_resposta;
+
+
+--
+-- TOC entry 216 (class 1259 OID 24929)
+-- Name: usuarios; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.usuarios (
+    id_usuario integer NOT NULL,
+    nome character varying(100) NOT NULL,
+    email character varying(100) NOT NULL,
+    senha character varying(255) NOT NULL,
+    tipo character varying(20) NOT NULL,
+    CONSTRAINT usuarios_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['aluno'::character varying, 'professor'::character varying, 'admin'::character varying])::text[])))
+);
+
+
+ALTER TABLE public.usuarios OWNER TO postgres;
+
+--
+-- TOC entry 215 (class 1259 OID 24928)
+-- Name: usuarios_id_usuario_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+--
+
+CREATE SEQUENCE public.usuarios_id_usuario_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.usuarios_id_usuario_seq OWNER TO postgres;
+
+--
+-- TOC entry 3570 (class 0 OID 0)
+-- Dependencies: 215
+-- Name: usuarios_id_usuario_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+--
+
+ALTER SEQUENCE public.usuarios_id_usuario_seq OWNED BY public.usuarios.id_usuario;
+
+
+--
+-- TOC entry 3316 (class 2604 OID 25033)
+-- Name: autenticacao id_sessao; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.autenticacao ALTER COLUMN id_sessao SET DEFAULT nextval('public.autenticacao_id_sessao_seq'::regclass);
+
+
+--
+-- TOC entry 3319 (class 2604 OID 25065)
+-- Name: feedback id_feedback; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feedback ALTER COLUMN id_feedback SET DEFAULT nextval('public.feedback_id_feedback_seq'::regclass);
+
+
+--
+-- TOC entry 3317 (class 2604 OID 25045)
+-- Name: historico_notas id_historico; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.historico_notas ALTER COLUMN id_historico SET DEFAULT nextval('public.historico_notas_id_historico_seq'::regclass);
+
+
+--
+-- TOC entry 3321 (class 2604 OID 25088)
+-- Name: logs id_log; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.logs ALTER COLUMN id_log SET DEFAULT nextval('public.logs_id_log_seq'::regclass);
+
+
+--
+-- TOC entry 3314 (class 2604 OID 24990)
+-- Name: notas id_nota; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.notas ALTER COLUMN id_nota SET DEFAULT nextval('public.notas_id_nota_seq'::regclass);
+
+
+--
+-- TOC entry 3309 (class 2604 OID 24942)
+-- Name: provas id_prova; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.provas ALTER COLUMN id_prova SET DEFAULT nextval('public.provas_id_prova_seq'::regclass);
+
+
+--
+-- TOC entry 3311 (class 2604 OID 24955)
+-- Name: questoes id_questao; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.questoes ALTER COLUMN id_questao SET DEFAULT nextval('public.questoes_id_questao_seq'::regclass);
+
+
+--
+-- TOC entry 3312 (class 2604 OID 24970)
+-- Name: respostas id_resposta; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.respostas ALTER COLUMN id_resposta SET DEFAULT nextval('public.respostas_id_resposta_seq'::regclass);
+
+
+--
+-- TOC entry 3308 (class 2604 OID 24932)
+-- Name: usuarios id_usuario; Type: DEFAULT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.usuarios ALTER COLUMN id_usuario SET DEFAULT nextval('public.usuarios_id_usuario_seq'::regclass);
+
+
+--
+-- TOC entry 3518 (class 0 OID 25030)
+-- Dependencies: 226
+-- Data for Name: autenticacao; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.autenticacao (id_sessao, id_usuario, token, expiracao) FROM stdin;
+1	1	abc123token	2025-12-15 19:16:39.092793
+\.
+
+
+--
+-- TOC entry 3522 (class 0 OID 25062)
+-- Dependencies: 230
+-- Data for Name: feedback; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.feedback (id_feedback, id_usuario, id_prova, comentario, nota_avaliacao, data_envio) FROM stdin;
+1	1	1	Prova bem elaborada, mas difícil.	4.5	2025-11-30 20:08:58.426067
+\.
+
+
+--
+-- TOC entry 3520 (class 0 OID 25042)
+-- Dependencies: 228
+-- Data for Name: historico_notas; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.historico_notas (id_historico, id_nota, nota_antiga, nota_nova, alterado_por, data_alteracao) FROM stdin;
+2	3	7.50	8.00	1	2025-11-30 20:08:21.401182
+\.
+
+
+--
+-- TOC entry 3524 (class 0 OID 25085)
+-- Dependencies: 232
+-- Data for Name: logs; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.logs (id_log, id_usuario, acao, descricao, data_evento) FROM stdin;
+1	1	LOGIN	Usuário Maria Silva acessou o sistema	2025-11-30 20:34:15.909031
+2	2	RESPOSTA	Usuário João Souza respondeu questão da Prova de Matemática	2025-11-30 20:34:15.909031
+3	3	CRIAR_PROVA	Professor Carlos criou a Prova de História	2025-11-30 20:34:15.909031
+4	3	CRIAR_PROVA	Professora Ana Lima criou a Prova de História	2025-11-30 20:36:23.087004
+5	3	CRIAR_PROVA	Prova criada: Prova de Geografia	2025-11-30 20:38:26.914868
+6	5	CRIAR_PROVA	Prova criada: Avaliação 01	2026-01-28 19:32:25.247672
+\.
+
+
+--
+-- TOC entry 3516 (class 0 OID 24987)
+-- Dependencies: 224
+-- Data for Name: notas; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.notas (id_nota, id_usuario, id_prova, pontuacao, data_avaliacao) FROM stdin;
+2	2	1	6.00	2025-11-30 17:55:24.939483
+3	1	1	8.00	2025-11-30 20:08:21.401182
+4	7	1	5.00	2026-01-28 19:52:21.296573
+\.
+
+
+--
+-- TOC entry 3510 (class 0 OID 24939)
+-- Dependencies: 218
+-- Data for Name: provas; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.provas (id_prova, titulo, disciplina, data_criacao, id_professor) FROM stdin;
+1	Prova de Matemática - 1º Bimestre	Matemática	2025-11-30	3
+2	Prova de História	História	2025-11-30	1
+3	Prova de Geografia	Geografia	2025-11-30	3
+4	Avaliação 01	Matematica	2026-01-28	5
+\.
+
+
+--
+-- TOC entry 3512 (class 0 OID 24952)
+-- Dependencies: 220
+-- Data for Name: questoes; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.questoes (id_questao, enunciado, tipo, alternativas, resposta_correta, id_prova) FROM stdin;
+1	Quanto é 2 + 2?	objetiva	A) 3; B) 4; C) 5; D) 6	B	1
+2	Explique o conceito de fração.	dissertativa	\N	\N	1
+\.
+
+
+--
+-- TOC entry 3514 (class 0 OID 24967)
+-- Dependencies: 222
+-- Data for Name: respostas; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.respostas (id_resposta, id_usuario, id_questao, resposta_dada, data_envio) FROM stdin;
+1	1	1	B	2025-11-30 17:55:24.939483
+2	2	1	C	2025-11-30 17:55:24.939483
+3	1	2	Fração é a divisão de um inteiro em partes iguais.	2025-11-30 17:55:24.939483
+4	7	1	b	2026-01-28 20:11:28.918349
+5	7	2	uma divisão	2026-01-28 20:11:28.918349
+\.
+
+
+--
+-- TOC entry 3508 (class 0 OID 24929)
+-- Dependencies: 216
+-- Data for Name: usuarios; Type: TABLE DATA; Schema: public; Owner: postgres
+--
+
+COPY public.usuarios (id_usuario, nome, email, senha, tipo) FROM stdin;
+1	Maria Silva	maria@escola.com	senha123	aluno
+2	João Souza	joao@escola.com	senha123	aluno
+3	Prof. Ana Lima	ana@escola.com	senha123	professor
+4	Carlos Mendes	carlos@escola.com	senha123	aluno
+5	Prof Demo	prof@demo.com	$2b$10$81kqvW89Rtrk0CT1w5.Uk.O2eyYRDsFydqF6TOrYnlI7GrxET7eeC	professor
+6	Aluno Demo	aluno@demo.com	$2b$10$fFsuI07.9T5JLcJLERNCCuG4jgNChayoUT2uUsrglzLvTUC43xk0G	aluno
+7	Teste	teste@exemplo.com	$2b$10$BjkFczXjOX5cYr7v6Q/Qq.ll674c3S8cTBCpajFe0sRE0fQOS/T82	aluno
+8	ProfJP	eu@exemplo.com	$2b$10$8NZk2ygGQi1C7f79nO2uFuaUFoYSbVx4su1G3P6loRoLzo.eNGC6G	professor
+9	ProJP	teste2@exemplo.com	$2b$10$z5cAmAKpvp1auZCGzL/MGOFpVIv5Ak8K6abv.eBni9HI2PIV00ZlO	professor
+\.
+
+
+--
+-- TOC entry 3572 (class 0 OID 0)
+-- Dependencies: 225
+-- Name: autenticacao_id_sessao_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.autenticacao_id_sessao_seq', 1, true);
+
+
+--
+-- TOC entry 3573 (class 0 OID 0)
+-- Dependencies: 229
+-- Name: feedback_id_feedback_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.feedback_id_feedback_seq', 1, true);
+
+
+--
+-- TOC entry 3574 (class 0 OID 0)
+-- Dependencies: 227
+-- Name: historico_notas_id_historico_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.historico_notas_id_historico_seq', 2, true);
+
+
+--
+-- TOC entry 3575 (class 0 OID 0)
+-- Dependencies: 231
+-- Name: logs_id_log_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.logs_id_log_seq', 6, true);
+
+
+--
+-- TOC entry 3576 (class 0 OID 0)
+-- Dependencies: 223
+-- Name: notas_id_nota_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.notas_id_nota_seq', 4, true);
+
+
+--
+-- TOC entry 3577 (class 0 OID 0)
+-- Dependencies: 217
+-- Name: provas_id_prova_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.provas_id_prova_seq', 4, true);
+
+
+--
+-- TOC entry 3578 (class 0 OID 0)
+-- Dependencies: 219
+-- Name: questoes_id_questao_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.questoes_id_questao_seq', 2, true);
+
+
+--
+-- TOC entry 3579 (class 0 OID 0)
+-- Dependencies: 221
+-- Name: respostas_id_resposta_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.respostas_id_resposta_seq', 7, true);
+
+
+--
+-- TOC entry 3580 (class 0 OID 0)
+-- Dependencies: 215
+-- Name: usuarios_id_usuario_seq; Type: SEQUENCE SET; Schema: public; Owner: postgres
+--
+
+SELECT pg_catalog.setval('public.usuarios_id_usuario_seq', 9, true);
+
+
+--
+-- TOC entry 3342 (class 2606 OID 25035)
+-- Name: autenticacao autenticacao_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.autenticacao
+    ADD CONSTRAINT autenticacao_pkey PRIMARY KEY (id_sessao);
+
+
+--
+-- TOC entry 3346 (class 2606 OID 25070)
+-- Name: feedback feedback_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feedback
+    ADD CONSTRAINT feedback_pkey PRIMARY KEY (id_feedback);
+
+
+--
+-- TOC entry 3344 (class 2606 OID 25048)
+-- Name: historico_notas historico_notas_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.historico_notas
+    ADD CONSTRAINT historico_notas_pkey PRIMARY KEY (id_historico);
+
+
+--
+-- TOC entry 3348 (class 2606 OID 25093)
+-- Name: logs logs_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.logs
+    ADD CONSTRAINT logs_pkey PRIMARY KEY (id_log);
+
+
+--
+-- TOC entry 3338 (class 2606 OID 24993)
+-- Name: notas notas_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.notas
+    ADD CONSTRAINT notas_pkey PRIMARY KEY (id_nota);
+
+
+--
+-- TOC entry 3340 (class 2606 OID 25113)
+-- Name: notas notas_usuario_prova_unique; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.notas
+    ADD CONSTRAINT notas_usuario_prova_unique UNIQUE (id_usuario, id_prova);
+
+
+--
+-- TOC entry 3330 (class 2606 OID 24945)
+-- Name: provas provas_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.provas
+    ADD CONSTRAINT provas_pkey PRIMARY KEY (id_prova);
+
+
+--
+-- TOC entry 3332 (class 2606 OID 24960)
+-- Name: questoes questoes_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.questoes
+    ADD CONSTRAINT questoes_pkey PRIMARY KEY (id_questao);
+
+
+--
+-- TOC entry 3334 (class 2606 OID 24975)
+-- Name: respostas respostas_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.respostas
+    ADD CONSTRAINT respostas_pkey PRIMARY KEY (id_resposta);
+
+
+--
+-- TOC entry 3336 (class 2606 OID 25115)
+-- Name: respostas respostas_usuario_questao_unique; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.respostas
+    ADD CONSTRAINT respostas_usuario_questao_unique UNIQUE (id_usuario, id_questao);
+
+
+--
+-- TOC entry 3326 (class 2606 OID 24937)
+-- Name: usuarios usuarios_email_key; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.usuarios
+    ADD CONSTRAINT usuarios_email_key UNIQUE (email);
+
+
+--
+-- TOC entry 3328 (class 2606 OID 24935)
+-- Name: usuarios usuarios_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.usuarios
+    ADD CONSTRAINT usuarios_pkey PRIMARY KEY (id_usuario);
+
+
+--
+-- TOC entry 3362 (class 2620 OID 25021)
+-- Name: respostas trg_calcular_nota; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_calcular_nota AFTER INSERT ON public.respostas FOR EACH ROW EXECUTE FUNCTION public.trigger_calcular_nota();
+
+
+--
+-- TOC entry 3363 (class 2620 OID 25060)
+-- Name: notas trg_log_nota; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_log_nota BEFORE UPDATE ON public.notas FOR EACH ROW EXECUTE FUNCTION public.log_alteracao_nota();
+
+
+--
+-- TOC entry 3361 (class 2620 OID 25100)
+-- Name: provas trg_log_prova; Type: TRIGGER; Schema: public; Owner: postgres
+--
+
+CREATE TRIGGER trg_log_prova AFTER INSERT ON public.provas FOR EACH ROW EXECUTE FUNCTION public.log_criacao_prova();
+
+
+--
+-- TOC entry 3355 (class 2606 OID 25036)
+-- Name: autenticacao autenticacao_id_usuario_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.autenticacao
+    ADD CONSTRAINT autenticacao_id_usuario_fkey FOREIGN KEY (id_usuario) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3358 (class 2606 OID 25076)
+-- Name: feedback feedback_id_prova_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feedback
+    ADD CONSTRAINT feedback_id_prova_fkey FOREIGN KEY (id_prova) REFERENCES public.provas(id_prova);
+
+
+--
+-- TOC entry 3359 (class 2606 OID 25071)
+-- Name: feedback feedback_id_usuario_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.feedback
+    ADD CONSTRAINT feedback_id_usuario_fkey FOREIGN KEY (id_usuario) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3356 (class 2606 OID 25054)
+-- Name: historico_notas historico_notas_alterado_por_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.historico_notas
+    ADD CONSTRAINT historico_notas_alterado_por_fkey FOREIGN KEY (alterado_por) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3357 (class 2606 OID 25049)
+-- Name: historico_notas historico_notas_id_nota_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.historico_notas
+    ADD CONSTRAINT historico_notas_id_nota_fkey FOREIGN KEY (id_nota) REFERENCES public.notas(id_nota);
+
+
+--
+-- TOC entry 3360 (class 2606 OID 25094)
+-- Name: logs logs_id_usuario_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.logs
+    ADD CONSTRAINT logs_id_usuario_fkey FOREIGN KEY (id_usuario) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3353 (class 2606 OID 24999)
+-- Name: notas notas_id_prova_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.notas
+    ADD CONSTRAINT notas_id_prova_fkey FOREIGN KEY (id_prova) REFERENCES public.provas(id_prova);
+
+
+--
+-- TOC entry 3354 (class 2606 OID 24994)
+-- Name: notas notas_id_usuario_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.notas
+    ADD CONSTRAINT notas_id_usuario_fkey FOREIGN KEY (id_usuario) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3349 (class 2606 OID 24946)
+-- Name: provas provas_id_professor_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.provas
+    ADD CONSTRAINT provas_id_professor_fkey FOREIGN KEY (id_professor) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3350 (class 2606 OID 24961)
+-- Name: questoes questoes_id_prova_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.questoes
+    ADD CONSTRAINT questoes_id_prova_fkey FOREIGN KEY (id_prova) REFERENCES public.provas(id_prova);
+
+
+--
+-- TOC entry 3351 (class 2606 OID 24981)
+-- Name: respostas respostas_id_questao_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.respostas
+    ADD CONSTRAINT respostas_id_questao_fkey FOREIGN KEY (id_questao) REFERENCES public.questoes(id_questao);
+
+
+--
+-- TOC entry 3352 (class 2606 OID 24976)
+-- Name: respostas respostas_id_usuario_fkey; Type: FK CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.respostas
+    ADD CONSTRAINT respostas_id_usuario_fkey FOREIGN KEY (id_usuario) REFERENCES public.usuarios(id_usuario);
+
+
+--
+-- TOC entry 3530 (class 0 OID 0)
+-- Dependencies: 5
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: pg_database_owner
+--
+
+GRANT USAGE ON SCHEMA public TO app_avaliacao;
+
+
+--
+-- TOC entry 3531 (class 0 OID 0)
+-- Dependencies: 251
+-- Name: FUNCTION calcular_nota(id_aluno_c integer, id_prova_c integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.calcular_nota(id_aluno_c integer, id_prova_c integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3532 (class 0 OID 0)
+-- Dependencies: 253
+-- Name: FUNCTION consultar_provas_user(id_professor_c integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.consultar_provas_user(id_professor_c integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3533 (class 0 OID 0)
+-- Dependencies: 250
+-- Name: FUNCTION log_alteracao_nota(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.log_alteracao_nota() TO app_avaliacao;
+
+
+--
+-- TOC entry 3534 (class 0 OID 0)
+-- Dependencies: 233
+-- Name: FUNCTION log_criacao_prova(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.log_criacao_prova() TO app_avaliacao;
+
+
+--
+-- TOC entry 3535 (class 0 OID 0)
+-- Dependencies: 252
+-- Name: FUNCTION relatorio_aprovados_reprovados(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.relatorio_aprovados_reprovados() TO app_avaliacao;
+
+
+--
+-- TOC entry 3536 (class 0 OID 0)
+-- Dependencies: 249
+-- Name: FUNCTION relatorio_desempenho_provas(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.relatorio_desempenho_provas() TO app_avaliacao;
+
+
+--
+-- TOC entry 3537 (class 0 OID 0)
+-- Dependencies: 247
+-- Name: FUNCTION relatorio_media_alunos(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.relatorio_media_alunos() TO app_avaliacao;
+
+
+--
+-- TOC entry 3538 (class 0 OID 0)
+-- Dependencies: 246
+-- Name: FUNCTION relatorio_notas_aluno(id_aluno integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.relatorio_notas_aluno(id_aluno integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3539 (class 0 OID 0)
+-- Dependencies: 245
+-- Name: FUNCTION relatorio_notas_todos(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.relatorio_notas_todos() TO app_avaliacao;
+
+
+--
+-- TOC entry 3540 (class 0 OID 0)
+-- Dependencies: 248
+-- Name: FUNCTION relatorio_ranking_prova(id_prova integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.relatorio_ranking_prova(id_prova integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3541 (class 0 OID 0)
+-- Dependencies: 257
+-- Name: PROCEDURE resetar_prova(IN id_prova_r integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON PROCEDURE public.resetar_prova(IN id_prova_r integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3542 (class 0 OID 0)
+-- Dependencies: 256
+-- Name: FUNCTION trigger_calcular_nota(); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON FUNCTION public.trigger_calcular_nota() TO app_avaliacao;
+
+
+--
+-- TOC entry 3543 (class 0 OID 0)
+-- Dependencies: 255
+-- Name: PROCEDURE verificar_prova(IN id_prova_v integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON PROCEDURE public.verificar_prova(IN id_prova_v integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3544 (class 0 OID 0)
+-- Dependencies: 254
+-- Name: PROCEDURE verificar_usuario(IN id_usuario_v integer); Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON PROCEDURE public.verificar_usuario(IN id_usuario_v integer) TO app_avaliacao;
+
+
+--
+-- TOC entry 3545 (class 0 OID 0)
+-- Dependencies: 226
+-- Name: TABLE autenticacao; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.autenticacao TO app_avaliacao;
+
+
+--
+-- TOC entry 3547 (class 0 OID 0)
+-- Dependencies: 225
+-- Name: SEQUENCE autenticacao_id_sessao_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.autenticacao_id_sessao_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3548 (class 0 OID 0)
+-- Dependencies: 230
+-- Name: TABLE feedback; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.feedback TO app_avaliacao;
+
+
+--
+-- TOC entry 3550 (class 0 OID 0)
+-- Dependencies: 229
+-- Name: SEQUENCE feedback_id_feedback_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.feedback_id_feedback_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3551 (class 0 OID 0)
+-- Dependencies: 228
+-- Name: TABLE historico_notas; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.historico_notas TO app_avaliacao;
+
+
+--
+-- TOC entry 3553 (class 0 OID 0)
+-- Dependencies: 227
+-- Name: SEQUENCE historico_notas_id_historico_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.historico_notas_id_historico_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3554 (class 0 OID 0)
+-- Dependencies: 232
+-- Name: TABLE logs; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.logs TO app_avaliacao;
+
+
+--
+-- TOC entry 3556 (class 0 OID 0)
+-- Dependencies: 231
+-- Name: SEQUENCE logs_id_log_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.logs_id_log_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3557 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: TABLE notas; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.notas TO app_avaliacao;
+
+
+--
+-- TOC entry 3559 (class 0 OID 0)
+-- Dependencies: 223
+-- Name: SEQUENCE notas_id_nota_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.notas_id_nota_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3560 (class 0 OID 0)
+-- Dependencies: 218
+-- Name: TABLE provas; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.provas TO app_avaliacao;
+
+
+--
+-- TOC entry 3562 (class 0 OID 0)
+-- Dependencies: 217
+-- Name: SEQUENCE provas_id_prova_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.provas_id_prova_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3563 (class 0 OID 0)
+-- Dependencies: 220
+-- Name: TABLE questoes; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.questoes TO app_avaliacao;
+
+
+--
+-- TOC entry 3565 (class 0 OID 0)
+-- Dependencies: 219
+-- Name: SEQUENCE questoes_id_questao_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.questoes_id_questao_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3566 (class 0 OID 0)
+-- Dependencies: 222
+-- Name: TABLE respostas; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.respostas TO app_avaliacao;
+
+
+--
+-- TOC entry 3568 (class 0 OID 0)
+-- Dependencies: 221
+-- Name: SEQUENCE respostas_id_resposta_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.respostas_id_resposta_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 3569 (class 0 OID 0)
+-- Dependencies: 216
+-- Name: TABLE usuarios; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.usuarios TO app_avaliacao;
+
+
+--
+-- TOC entry 3571 (class 0 OID 0)
+-- Dependencies: 215
+-- Name: SEQUENCE usuarios_id_usuario_seq; Type: ACL; Schema: public; Owner: postgres
+--
+
+GRANT ALL ON SEQUENCE public.usuarios_id_usuario_seq TO app_avaliacao;
+
+
+--
+-- TOC entry 2093 (class 826 OID 25108)
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: public; Owner: postgres
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO app_avaliacao;
+
+
+--
+-- TOC entry 2094 (class 826 OID 25109)
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: public; Owner: postgres
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO app_avaliacao;
+
+
+--
+-- TOC entry 2092 (class 826 OID 25107)
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: postgres
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT,INSERT,DELETE,UPDATE ON TABLES TO app_avaliacao;
+
+
+-- Completed on 2026-01-29 19:19:50 -03
+
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict D6IitSkkZStMB786O5vrO3BfcPWvFdntOPYSHoziPFbBAcYiRXfpZcnSgt52DDf
+
