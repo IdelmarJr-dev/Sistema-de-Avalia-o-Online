@@ -1,3 +1,4 @@
+// mapa de rotas
 import { createRouter, createWebHistory } from "vue-router";
 import Login from "./views/Login.vue";
 import Provas from "./views/Provas.vue";
